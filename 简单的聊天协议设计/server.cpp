@@ -18,34 +18,50 @@ map<SOCKET, int> user_map;  // 其中的int如果为1则为在线
 queue<string> message_queue; /*如果遇到消息并发的情形，需要添加消息队列
                                单开一个处理并发消息转发的线程*/
 
-// 为每一个连接到此端口的用户创建一个线程
+                               // 为每一个连接到此端口的用户创建一个线程
 DWORD WINAPI handlerRequest(LPVOID lparam)
 {
-	SOCKET ClientSocket = (SOCKET)(LPVOID)lparam;
+    SOCKET ClientSocket = (SOCKET)(LPVOID)lparam;
     user_map[ClientSocket] = 1;
-    cout << "欢迎用户 " << ClientSocket << " 加入聊天！" << endl;
+
+    char user_name[10];
+    strcpy_s(user_name, to_string(ClientSocket).data());
+    send(ClientSocket, user_name, 10, 0);
+
+    SYSTEMTIME systime = { 0 };
+    GetLocalTime(&systime);
+    cout << endl << systime.wYear << "年" << systime.wMonth << "月" << systime.wDay << "日";
+    cout << systime.wHour << "时" << systime.wMinute << "分" << systime.wSecond << "秒" << endl;
+    cout << "Log：用户--" << ClientSocket << "--加入聊天！" << endl;
+    cout << "-----------------------------------------------------" << endl;
 
     // 循环接受客户端数据
     int recvResult;
     int sendResult;
     int flag = 1;
-    do{
+    do {
         char recvBuf[DEFAULT_BUFLEN] = "";
         char sendBuf[DEFAULT_BUFLEN] = "";
         recvResult = recv(ClientSocket, recvBuf, DEFAULT_BUFLEN, 0);
         if (recvResult > 0) {
-            strcpy_s(sendBuf, "user ");
+            SYSTEMTIME Logtime = { 0 };
+            GetLocalTime(&Logtime);
+
+            strcpy_s(sendBuf, "用户--");
             string ClientID = to_string(ClientSocket);
             strcat_s(sendBuf, ClientID.data()); // data函数直接转换为char*
-            strcat_s(sendBuf, ": ");
+            strcat_s(sendBuf, "--: ");
             strcat_s(sendBuf, recvBuf);
             // message_queue.push(sendBuf); //这里将消息存储到队列中
 
-            cout << ClientSocket << " 说：" << recvBuf << endl;
+            cout << endl << Logtime.wYear << "年" << Logtime.wMonth << "月" << Logtime.wDay << "日";
+            cout << Logtime.wHour << "时" << Logtime.wMinute << "分" << Logtime.wSecond << "秒" << endl;
+            cout << "Log：用户--" << ClientSocket << "--的消息：" << recvBuf << endl;
+            cout << "-----------------------------------------------------" << endl;
             for (auto it : user_map) {
                 if (it.first != ClientSocket && it.second == 1) {
                     sendResult = send(it.first, sendBuf, DEFAULT_BUFLEN, 0);
-                    if(sendResult == SOCKET_ERROR)
+                    if (sendResult == SOCKET_ERROR)
                         cout << "send failed with error: " << WSAGetLastError() << endl;
                 }
             }
@@ -55,9 +71,14 @@ DWORD WINAPI handlerRequest(LPVOID lparam)
         }
     } while (recvResult != SOCKET_ERROR && flag != 0);
 
-    cout << ClientSocket << " 离开了聊天（quq）" << endl;
-	closesocket(ClientSocket);
-	return 0;
+    GetLocalTime(&systime);
+    cout << endl << systime.wYear << "年" << systime.wMonth << "月" << systime.wDay << "日";
+    cout << systime.wHour << "时" << systime.wMinute << "分" << systime.wSecond << "秒" << endl;
+    cout << "Log：用户--" << ClientSocket << "--离开了聊天（quq）" << endl;
+    cout << "-----------------------------------------------------" << endl;
+
+    closesocket(ClientSocket);
+    return 0;
 }
 
 int main()
@@ -86,7 +107,7 @@ int main()
     // 用于bind函数绑定的IP地址和端口号
     sockaddr_in service;
     service.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &service.sin_addr.s_addr);
+    inet_pton(AF_INET, "10.130.151.45", &service.sin_addr.s_addr);
     service.sin_port = htons(27015);
     iResult = bind(ListenSocket, (SOCKADDR*)&service, sizeof(service));
     if (iResult == SOCKET_ERROR) {
@@ -118,7 +139,7 @@ int main()
             WSACleanup();
             return 1;
         }
-        else{
+        else {
             // 创建线程，并且传入与client通讯的套接字
             HANDLE hThread = CreateThread(NULL, 0, handlerRequest, (LPVOID)AcceptSocket, 0, NULL);
             CloseHandle(hThread); // 关闭对线程的引用

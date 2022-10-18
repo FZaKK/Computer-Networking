@@ -12,10 +12,11 @@
 using namespace std;
 string quit_string = "quit";
 int flag = 1;
+char user_name[10]; //接受服务端分发的用户名
 
 DWORD WINAPI Recv(LPVOID lparam_socket) {
     int recvResult;
-    SOCKET* recvSocket = (SOCKET*)lparam_socket;
+    SOCKET* recvSocket = (SOCKET*)lparam_socket; //一定要使用指针型变量，因为要指向connect socket的位置
 
     while (1) {
         char recvbuf[DEFAULT_BUFLEN] = "";
@@ -44,22 +45,22 @@ DWORD WINAPI Send(LPVOID lparam_socket) {
     int sendResult;
     SOCKET* sendSocket = (SOCKET*)lparam_socket;
 
-    while (1) 
+    while (1)
     {
         //----------------------
         // 发送消息
-        char sendbuf[DEFAULT_BUFLEN] = "";
+        char sendBuf[DEFAULT_BUFLEN] = "";
         cout << "请输入你的消息：";
-        cin >> sendbuf;
-        
-        if (string(sendbuf) == quit_string) {
+        cin.getline(sendBuf, DEFAULT_BUFLEN);   // 保证可以输入空格，getline函数设置好了以换行符为结束
+
+        if (string(sendBuf) == quit_string) {
             flag = 0;
             closesocket(*sendSocket);
             cout << endl << "即将退出聊天" << endl;
             return 1;
         }
         else {
-            sendResult = send(*sendSocket, sendbuf, DEFAULT_BUFLEN, 0);
+            sendResult = send(*sendSocket, sendBuf, DEFAULT_BUFLEN, 0);
             if (sendResult == SOCKET_ERROR) {
                 cout << "send failed with error: " << WSAGetLastError() << endl;
                 closesocket(*sendSocket);
@@ -112,7 +113,7 @@ int main() {
     // 要连接的服务端的IP地址、端口号
     struct sockaddr_in clientService;
     clientService.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &clientService.sin_addr.s_addr);
+    inet_pton(AF_INET, "10.130.151.45", &clientService.sin_addr.s_addr);
     clientService.sin_port = htons(DEFAULT_PORT);
 
     //----------------------
@@ -125,8 +126,10 @@ int main() {
         return 1;
     }
 
+    recv(ConnectSocket, user_name, 10, 0);
+
     // 打印进入聊天的标志
-    cout << "              Welcome    User    " << ConnectSocket << endl;
+    cout << "              Welcome    User    " << user_name << endl;
     cout << "*****************************************************" << endl;
     cout << "             Use quit command to quit" << endl;
     cout << "-----------------------------------------------------" << endl;
@@ -136,6 +139,7 @@ int main() {
     HANDLE hThread[2];
     hThread[0] = CreateThread(NULL, 0, Recv, (LPVOID)&ConnectSocket, 0, NULL);
     hThread[1] = CreateThread(NULL, 0, Send, (LPVOID)&ConnectSocket, 0, NULL);
+
     WaitForMultipleObjects(2, hThread, TRUE, INFINITE);
     CloseHandle(hThread[0]);
     CloseHandle(hThread[1]);
