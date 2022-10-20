@@ -18,7 +18,7 @@ map<SOCKET, int> user_map;  // 其中的int如果为1则为在线
 queue<string> message_queue; /*如果遇到消息并发的情形，需要添加消息队列
                                单开一个处理并发消息转发的线程*/
 
-                               // 为每一个连接到此端口的用户创建一个线程
+// 为每一个连接到此端口的用户创建一个线程
 DWORD WINAPI handlerRequest(LPVOID lparam)
 {
     SOCKET ClientSocket = (SOCKET)(LPVOID)lparam;
@@ -38,14 +38,41 @@ DWORD WINAPI handlerRequest(LPVOID lparam)
     // 循环接受客户端数据
     int recvResult;
     int sendResult;
-    int flag = 1;
+    int flag = 1; // 控制是否退出该Socket的接受循环
+    int judge_flag = 1; // 默认群发
     do {
         char recvBuf[DEFAULT_BUFLEN] = "";
         char sendBuf[DEFAULT_BUFLEN] = "";
+        char special_message[DEFAULT_BUFLEN + 50] = "";
         recvResult = recv(ClientSocket, recvBuf, DEFAULT_BUFLEN, 0);
+        judge_flag = 1;
         if (recvResult > 0) {
-            SYSTEMTIME Logtime = { 0 };
-            GetLocalTime(&Logtime);
+            char special_user_name[10] = "";
+            for (int i = 0; i < DEFAULT_BUFLEN; i++) {
+                if (recvBuf[i] == '|') {
+                    judge_flag = 0;
+                }
+            }
+
+            // temp_flag为0表明要单独发送，判断是否要单发
+            if (judge_flag == 0) {
+                int j;
+                for (j = 0; j < DEFAULT_BUFLEN; j++) {
+                    if (recvBuf[j] == '|') {
+                        special_user_name[j] = '\0';
+                        for (int z = j + 1; z < DEFAULT_BUFLEN; z++) {
+                            special_message[z - j - 1] = recvBuf[z];
+                        }
+                        strcat_s(special_message, "( from ");
+                        strcat_s(special_message, to_string(ClientSocket).data());
+                        strcat_s(special_message, ")\0");
+                        break;
+                    }
+                    else {
+                        special_user_name[j] = recvBuf[j];
+                    }
+                }
+            }
 
             strcpy_s(sendBuf, "用户--");
             string ClientID = to_string(ClientSocket);
@@ -54,15 +81,29 @@ DWORD WINAPI handlerRequest(LPVOID lparam)
             strcat_s(sendBuf, recvBuf);
             // message_queue.push(sendBuf); //这里将消息存储到队列中
 
+            SYSTEMTIME Logtime = { 0 };
+            GetLocalTime(&Logtime);
             cout << endl << Logtime.wYear << "年" << Logtime.wMonth << "月" << Logtime.wDay << "日";
             cout << Logtime.wHour << "时" << Logtime.wMinute << "分" << Logtime.wSecond << "秒" << endl;
             cout << "Log：用户--" << ClientSocket << "--的消息：" << recvBuf << endl;
             cout << "-----------------------------------------------------" << endl;
-            for (auto it : user_map) {
-                if (it.first != ClientSocket && it.second == 1) {
-                    sendResult = send(it.first, sendBuf, DEFAULT_BUFLEN, 0);
-                    if (sendResult == SOCKET_ERROR)
-                        cout << "send failed with error: " << WSAGetLastError() << endl;
+
+            if (judge_flag == 1) {
+                for (auto it : user_map) {
+                    if (it.first != ClientSocket && it.second == 1) {
+                        sendResult = send(it.first, sendBuf, DEFAULT_BUFLEN, 0);
+                        if (sendResult == SOCKET_ERROR)
+                            cout << "send failed with error: " << WSAGetLastError() << endl;
+                    }
+                }
+            }
+            else {
+                for (auto it : user_map) {
+                    if (to_string(it.first) == string(special_user_name) && it.second == 1) {
+                        sendResult = send(it.first, special_message, DEFAULT_BUFLEN, 0);
+                        if (sendResult == SOCKET_ERROR)
+                            cout << "send failed with error: " << WSAGetLastError() << endl;
+                    }
                 }
             }
         }
