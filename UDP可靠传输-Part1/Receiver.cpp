@@ -10,11 +10,12 @@ using namespace std;
 #define DEFAULT_PORT 27015
 #define DEFAULT_BUFLEN 4096
 #define UDP_LEN sizeof(my_udp)
+#define MAX_FILESIZE 1024 * 1024 * 10
 
 #pragma comment(lib, "Ws2_32.lib")
 
-const uint8_t START = 0x10;  
-const uint8_t OVER = 0x8;  
+const uint8_t START = 0x10;
+const uint8_t OVER = 0x8;
 
 struct HEADER {
     uint16_t datasize;
@@ -55,12 +56,12 @@ struct HEADER {
 class my_udp {
 public:
     HEADER udp_header;
-    char buffer[DEFAULT_BUFLEN] = "";
+    char buffer[DEFAULT_BUFLEN + 1] = ""; // 虽然这里+1了，但是根本不影响4096的大小，因为\0不算strlen
 public:
     my_udp() {};
     my_udp(HEADER& header);
     my_udp(HEADER& header, string data_segment);
-    void set_value(HEADER header, string data_segment);
+    void set_value(HEADER header, char* data_segment, int size); // 这里一定要注意
     uint16_t checksum() {};
 };
 
@@ -71,21 +72,25 @@ my_udp::my_udp(HEADER& header) {
 
 my_udp::my_udp(HEADER& header, string data_segment) {
     udp_header = header;
-    strcpy_s(buffer, data_segment.c_str());
+    for (int i = 0; i < data_segment.length(); i++) {
+        buffer[i] = data_segment[i];
+    }
+    buffer[data_segment.length()] = '\0';
 };
 
-void my_udp::set_value(HEADER header, string data_segment) {
+void my_udp::set_value(HEADER header, char* data_segment, int size) {
     udp_header = header;
-    strcpy_s(buffer, data_segment.c_str());
+    memcpy(buffer, data_segment, size);
 }
 
 // 目前都是在工作路径下操作，可以修改成“/测试文件/”
 void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize) {
-    string file_content = "";
+    char* file_content = new char[MAX_FILESIZE]; // 偷懒了，直接调大
     string filename = "";
     long size = 0;
     int iResult = 0;
     bool flag = true;
+
     while (flag) {
         char* RecvBuf = new char[UDP_LEN]();
         my_udp temp;
@@ -96,25 +101,32 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
         else {
             memcpy(&temp, RecvBuf, UDP_LEN);
             if (temp.udp_header.Flag == START) {
+                cout << temp.udp_header.datasize << endl;
                 filename = temp.buffer;
                 cout << filename << endl;
             }
-            else if(temp.udp_header.Flag == OVER){
-                file_content = file_content + temp.buffer;
+            else if (temp.udp_header.Flag == OVER) {
+                // file_content = file_content + temp.buffer;
+                memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
                 size += temp.udp_header.datasize;
-                cout << file_content << endl;
+                // cout << file_content << endl;
+                cout << temp.udp_header.SEQ << endl;
                 cout << size << endl;
                 ofstream fout(filename, ofstream::binary);
-                fout.write(file_content.c_str(), size);
+                fout.write(file_content, size); // 这里还是size,如果使用string.data或c_str的话图片不显示，经典深拷贝问题
                 fout.close();
                 flag = false;
             }
             else {
-                file_content = file_content + temp.buffer;
+                // file_content = file_content + temp.buffer;
+                memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
                 size += temp.udp_header.datasize;
+                cout << temp.udp_header.SEQ << endl;
                 // cout << file_content << endl;
             }
         }
+
+        delete[] RecvBuf; // 一定要delete掉啊，否则不给堆区了
     }
 }
 
@@ -176,7 +188,7 @@ int main()
 
 
 
-    
+
     //-----------------------------------------------
     // 完成传输后，关闭socket
     iResult = closesocket(RecvSocket);

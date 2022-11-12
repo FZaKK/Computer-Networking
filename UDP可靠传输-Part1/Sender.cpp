@@ -4,12 +4,14 @@
 #include <fstream>
 #include <string>
 #include <cstring>
+#include <windows.h>
 using namespace std;
 
 #define WIN32_LEAN_AND_MEAN
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 27015
 #define DEFAULT_BUFLEN 4096 // 2^12大小
+#define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 
 // 连接上ws2_32.lib
@@ -36,7 +38,7 @@ struct HEADER {
         this->STREAM_SEQ = 0;
         this->SEQ = 0;
     }
-    
+
     HEADER(uint16_t datasize, uint16_t cksum, uint8_t Flag, uint8_t STREAM_SEQ, uint16_t SEQ) {
         this->datasize = datasize;
         this->cksum = cksum;
@@ -57,12 +59,12 @@ struct HEADER {
 class my_udp {
 public:
     HEADER udp_header;
-    char buffer[DEFAULT_BUFLEN] = "";
+    char buffer[DEFAULT_BUFLEN + 1] = ""; // 虽然这里+1了，但是根本不影响4096的大小，因为\0不算strlen
 public:
     my_udp() {};
     my_udp(HEADER& header);
     my_udp(HEADER& header, string data_segment);
-    void set_value(HEADER header, string data_segment);
+    void set_value(HEADER header, char* data_segment, int size); // 这里一定要注意
     uint16_t checksum() {};
 };
 
@@ -73,12 +75,15 @@ my_udp::my_udp(HEADER& header) {
 
 my_udp::my_udp(HEADER& header, string data_segment) {
     udp_header = header;
-    strcpy_s(buffer, data_segment.c_str());
+    for (int i = 0; i < data_segment.length(); i++) {
+        buffer[i] = data_segment[i];
+    }
+    buffer[data_segment.length()] = '\0';
 };
 
-void my_udp::set_value(HEADER header, string data_segment) {
+void my_udp::set_value(HEADER header, char* data_segment, int size) {
     udp_header = header;
-    strcpy_s(buffer, data_segment.c_str());
+    memcpy(buffer, data_segment, size);
 }
 
 // 返回值设成ERROR_CODE试试，要使用memcpy把整体发过去
@@ -87,7 +92,7 @@ void send_packet(my_udp& Packet, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     char* SendBuf = new char[UDP_LEN];
     memcpy(SendBuf, &Packet, UDP_LEN);
     iResult = sendto(SendSocket, SendBuf, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
-    
+
     // 直接把提示信息也封装进函数吧
     if (iResult == SOCKET_ERROR) {
         cout << "Sendto failed with error: " << WSAGetLastError() << endl;
@@ -117,20 +122,23 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     int packet_num = size / DEFAULT_BUFLEN + 1;
     cout << packet_num << endl;
 
-    // 包含第一个文件名以及START标志，最后一个数据包带OVER标志
+    // 包含第一个文件名以及START标志，最后一个数据包带OVER标志，分包的问题
     for (int index = 0; index < packet_num; index++) {
         if (index == packet_num - 1) {
-            string tempdata(binary_file_buf, index * DEFAULT_BUFLEN, size); // tempdata就是截取char数组的一段
-            udp_header.set_value(tempdata.length(), 0, OVER, index + 1, 0); // index + 1: filename
-            udp_packets.set_value(udp_header, tempdata);
+            // string tempdata(binary_file_buf, (index * DEFAULT_BUFLEN + 1), size); // tempdata就是截取char数组的一段
+            udp_header.set_value(size - index * DEFAULT_BUFLEN, 0, OVER, 0, (index + 1) % DEFAULT_SEQNUM); // index + 1: filename，取模
+            udp_packets.set_value(udp_header, binary_file_buf + index * DEFAULT_BUFLEN, size - index * DEFAULT_BUFLEN); // ??
         }
         else {
-            string tempdata(binary_file_buf, (index * DEFAULT_BUFLEN), ((index + 1) * DEFAULT_BUFLEN - 1));
-            udp_header.set_value(DEFAULT_BUFLEN, 0, 0, index + 1, 0);
-            udp_packets.set_value(udp_header, tempdata);
+            // string tempdata(binary_file_buf, (index * DEFAULT_BUFLEN + 1), ((index + 1) * DEFAULT_BUFLEN));
+            udp_header.set_value(DEFAULT_BUFLEN, 0, 0, 0, (index + 1) % DEFAULT_SEQNUM);
+            udp_packets.set_value(udp_header, binary_file_buf + index * DEFAULT_BUFLEN, DEFAULT_BUFLEN);
         }
         send_packet(udp_packets, SendSocket, RecvAddr);
-        cout << udp_packets.buffer << endl;
+        Sleep(10);
+
+        // 图片二进制输出不了
+        // cout << udp_packets.buffer << endl;
     }
 
     delete[] binary_file_buf;
@@ -185,7 +193,7 @@ int main()
     cout << "请输入想要发送的文件路径：" << endl;
     cin >> filename;
     send_file(filename, SendSocket, RecvAddr);
-    
+
     //---------------------------------------------
     // 当完成了相关的传输工作后，关闭socket，考虑可以补充选择文件传输
     iResult = closesocket(SendSocket);
