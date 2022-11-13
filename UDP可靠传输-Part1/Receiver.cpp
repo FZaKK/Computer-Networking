@@ -9,20 +9,25 @@ using namespace std;
 #define WIN32_LEAN_AND_MEAN
 #define DEFAULT_PORT 27015
 #define DEFAULT_BUFLEN 4096
+#define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 #define MAX_FILESIZE 1024 * 1024 * 10
+#define MAX_TIME 20
 
 #pragma comment(lib, "Ws2_32.lib")
 
-const uint8_t START = 0x10;
-const uint8_t OVER = 0x8;
+const uint16_t SYN = 0x1;
+const uint16_t ACK = 0x2;
+const uint16_t SYN_ACK = 0x3;
+const uint16_t START = 0x10;
+const uint16_t OVER = 0x8;
 
 struct HEADER {
     uint16_t datasize;
     uint16_t cksum;
     // 这里需要注意的是，顺序为STREAM SYN ACK FIN
-    uint8_t Flag;
-    uint8_t STREAM_SEQ;
+    uint16_t Flag;
+    uint16_t STREAM_SEQ;
     uint16_t SEQ;
 
     // 初始化函数，STREAM标记的是文件的开始与结束（应当在应用层设计，这里就放到udp里标识吧）
@@ -36,7 +41,7 @@ struct HEADER {
         this->SEQ = 0;
     }
 
-    HEADER(uint16_t datasize, uint16_t cksum, uint8_t Flag, uint8_t STREAM_SEQ, uint16_t SEQ) {
+    HEADER(uint16_t datasize, uint16_t cksum, uint16_t Flag, uint16_t STREAM_SEQ, uint16_t SEQ) {
         this->datasize = datasize;
         this->cksum = cksum;
         this->Flag = Flag;
@@ -44,7 +49,7 @@ struct HEADER {
         this->SEQ = SEQ;
     }
 
-    void set_value(uint16_t datasize, uint16_t cksum, uint8_t Flag, uint8_t STREAM_SEQ, uint16_t SEQ) {
+    void set_value(uint16_t datasize, uint16_t cksum, uint16_t Flag, uint16_t STREAM_SEQ, uint16_t SEQ) {
         this->datasize = datasize;
         this->cksum = cksum;
         this->Flag = Flag;
@@ -83,6 +88,23 @@ void my_udp::set_value(HEADER header, char* data_segment, int size) {
     memcpy(buffer, data_segment, size);
 }
 
+// 检验校验和
+uint16_t checksum(uint16_t* udp, int size) {
+    int count = (size + 1) / 2;
+    uint16_t* buf = (uint16_t*)malloc(size); // 可以+1也可以不+1
+    memset(buf, 0, size);
+    memcpy(buf, udp, size);
+    u_long sum = 0;
+    while (count--) {
+        sum += *buf++;
+        if (sum & 0xffff0000) {
+            sum &= 0xffff;
+            sum++;
+        }
+    }
+    return ~(sum & 0xffff);
+}
+
 // 目前都是在工作路径下操作，可以修改成“/测试文件/”
 void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize) {
     char* file_content = new char[MAX_FILESIZE]; // 偷懒了，直接调大
@@ -100,34 +122,102 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
         }
         else {
             memcpy(&temp, RecvBuf, UDP_LEN);
+
+            cout << "校验和：" << temp.udp_header.cksum << endl;
+            cout << "检验：" << checksum((uint16_t*)&temp, UDP_LEN) << endl;
+
             if (temp.udp_header.Flag == START) {
-                cout << temp.udp_header.datasize << endl;
                 filename = temp.buffer;
-                cout << filename << endl;
+
+                cout << "文件名：" << filename << endl;
             }
             else if (temp.udp_header.Flag == OVER) {
-                // file_content = file_content + temp.buffer;
                 memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
                 size += temp.udp_header.datasize;
+
                 // cout << file_content << endl;
-                cout << temp.udp_header.SEQ << endl;
-                cout << size << endl;
+                cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
+                cout << "文件大小：" << size << endl;
+
                 ofstream fout(filename, ofstream::binary);
                 fout.write(file_content, size); // 这里还是size,如果使用string.data或c_str的话图片不显示，经典深拷贝问题
                 fout.close();
                 flag = false;
             }
             else {
-                // file_content = file_content + temp.buffer;
                 memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
                 size += temp.udp_header.datasize;
-                cout << temp.udp_header.SEQ << endl;
+
+                cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
                 // cout << file_content << endl;
             }
         }
 
         delete[] RecvBuf; // 一定要delete掉啊，否则不给堆区了
     }
+}
+
+bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
+    HEADER udp_header;
+    my_udp first_connect;  // 初始化
+
+    int iResult = 0;
+    int SenderAddrSize = sizeof(SenderAddr);
+    char* connect_buffer = new char[UDP_LEN];
+
+    // 接收第一次握手SYN
+    while (true) {
+        iResult = recvfrom(RecvSocket, connect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, &SenderAddrSize);
+        if (iResult == SOCKET_ERROR) {
+            cout << "-------第一次握手接收失败-------:(" << endl;
+            return 0;
+        }
+        memcpy(&first_connect, connect_buffer, UDP_LEN);
+        if (first_connect.udp_header.Flag == SYN && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF) {
+            cout << "-------成功接收第一次握手-------" << endl;
+            break;
+        }
+    }
+
+    // 发送第二次握手信息
+    memset(&first_connect, 0, UDP_LEN);
+    memset(connect_buffer, 0, UDP_LEN);
+    first_connect.udp_header.Flag = SYN_ACK;
+    first_connect.udp_header.SEQ = 0xFFFF; // 第二次握手SEQ：0xFFFF
+    first_connect.udp_header.cksum = checksum((uint16_t*)&first_connect, UDP_LEN);
+    memcpy(connect_buffer, &first_connect, UDP_LEN);
+
+    iResult = sendto(RecvSocket, connect_buffer, UDP_LEN, 0, (SOCKADDR*)&SenderAddr, SenderAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第二次握手发送失败，已退出-------:(" << endl;
+        return 0;
+    }
+    clock_t start = clock(); // 记录第二次握手发送时间
+
+    // 接收第三次握手消息，超时重传
+    while (recvfrom(RecvSocket, connect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, &SenderAddrSize) <= 0) {
+        if (clock() - start > MAX_TIME) {
+            cout << "第二次握手超时，正在重传" << endl;
+            iResult = sendto(RecvSocket, connect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, SenderAddrSize);
+            if (iResult == SOCKET_ERROR) {
+                cout << "-------第二次握手发送失败，已退出-------:(" << endl;
+                return 0;
+            }
+            start = clock(); // 重设时间
+        }
+    }
+
+    // memset(&first_connect, 0, UDP_LEN);
+    memcpy(&first_connect, connect_buffer, UDP_LEN);
+    if (first_connect.udp_header.Flag == ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0) {
+        cout << "-------成功建立通信！可以接收数据!-------" << endl;
+    }
+    else {
+        cout << "-------连接发生错误，请等待重启-------:(" << endl;
+        return 0;
+    }
+
+    return 1;
 }
 
 int main()
@@ -138,10 +228,6 @@ int main()
 
     SOCKET RecvSocket;
     sockaddr_in RecvAddr;
-
-    // 可以注释掉了
-    char RecvBuf[UDP_LEN] = "";
-    int BufLen = UDP_LEN;
 
     // 确定发送的addr_in
     sockaddr_in SenderAddr;
@@ -177,17 +263,7 @@ int main()
 
     //-----------------------------------------------
     // recvfrom接收socket上的数据，这里需要改成循环接收，等到发送端断开连接后关闭
-    /*
-    iResult = recvfrom(RecvSocket, RecvBuf, BufLen, 0, (SOCKADDR*)&SenderAddr, &SenderAddrSize);
-    my_udp test;
-    memcpy(&test, RecvBuf, UDP_LEN);
-    cout << test.buffer << endl;
-    */
     recv_file(RecvSocket, SenderAddr, SenderAddrSize);
-
-
-
-
 
     //-----------------------------------------------
     // 完成传输后，关闭socket
