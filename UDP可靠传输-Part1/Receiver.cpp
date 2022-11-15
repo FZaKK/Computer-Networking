@@ -3,7 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
-#include <cstring>
+#include <time.h>
 using namespace std;
 
 #define WIN32_LEAN_AND_MEAN
@@ -26,6 +26,8 @@ const uint16_t FIN_ACK = 0x6;
 const uint16_t START_OVER = 0x18;
 
 int ready2quit = 0;
+uint16_t seq_order = 0;
+uint16_t stream_seq_order = 0;
 
 struct HEADER {
     uint16_t datasize;
@@ -109,7 +111,40 @@ uint16_t checksum(uint16_t* udp, int size) {
     return ~(sum & 0xffff);
 }
 
+void check_seq() {
+    if (seq_order >= DEFAULT_SEQNUM) {
+        seq_order = seq_order % DEFAULT_SEQNUM;
+    }
+}
+
+void check_stream_seq() {
+    if (stream_seq_order >= DEFAULT_SEQNUM) {
+        stream_seq_order = stream_seq_order % DEFAULT_SEQNUM;
+    }
+}
+
+void Send_ACK(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize) {
+    int iResult = 0;
+    my_udp ACK_udp;
+    char* SendBuf = new char[UDP_LEN]();
+
+    ACK_udp.udp_header.set_value(0, 0, ACK, stream_seq_order, seq_order);
+    uint16_t temp_sum = checksum((uint16_t*)&ACK_udp, UDP_LEN);
+    ACK_udp.udp_header.cksum = temp_sum;
+
+    memcpy(SendBuf, &ACK_udp, UDP_LEN);
+    iResult = sendto(RecvSocket, SendBuf, UDP_LEN, 0, (sockaddr*)&SenderAddr, SenderAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "Sendto failed with error: " << WSAGetLastError() << endl;
+    }
+    else {
+        cout << "Send to Clinet ACK:" << ACK_udp.udp_header.Flag << " SEQ:" << ACK_udp.udp_header.SEQ << endl;
+    }
+    delete[] SendBuf;
+}
+
 // 目前都是在工作路径下操作，可以修改成“/测试文件/”
+// 待测试
 void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize) {
     char* file_content = new char[MAX_FILESIZE]; // 偷懒了，直接调大
     string filename = "";
@@ -131,24 +166,44 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
             cout << "检验：" << checksum((uint16_t*)&temp, UDP_LEN) << endl;
 
             if (temp.udp_header.Flag == START) {
-                filename = temp.buffer;
+                // 出问题了
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) {
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    continue; // 不进行处理直接丢弃该数据包
+                }
+                else {
+                    filename = temp.buffer;
+                    cout << "文件名：" << filename << endl;
 
-                cout << "文件名：" << filename << endl;
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    seq_order++;
+                    check_seq();
+                }
             }
             else if(temp.udp_header.Flag == OVER){
-                memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
-                size += temp.udp_header.datasize;
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) { 
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    continue; // 不进行处理直接丢弃该数据包
+                }
+                else {
+                    memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
+                    size += temp.udp_header.datasize;
 
-                // cout << file_content << endl;
-                cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
-                cout << "文件大小：" << size << endl;
+                    // cout << file_content << endl;
+                    cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
 
-                ofstream fout(filename, ofstream::binary);
-                fout.write(file_content, size); // 这里还是size,如果使用string.data或c_str的话图片不显示，经典深拷贝问题
-                fout.close();
+                    ofstream fout(filename, ofstream::binary);
+                    fout.write(file_content, size); // 这里还是size,如果使用string.data或c_str的话图片不显示，经典深拷贝问题
+                    fout.close();
+                    flag = false;
 
-                cout << "-------成功接收文件-------" << endl;
-                flag = false;
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    // seq_order++; // 一个文件的最后一次
+                    // check_seq();
+
+                    cout << "文件大小：" << size << " bytes" << endl;
+                    cout << "-------成功接收文件-------" << endl;
+                }
             }
             // START_OVER表征发送端断连
             else if (temp.udp_header.Flag == START_OVER) {
@@ -157,16 +212,33 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
                 cout << "-------Sender马上断开连接！-------" << endl;
             }
             else {
-                memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
-                size += temp.udp_header.datasize;
+                // 这里可以封装一个Send_ACK
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) {
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    continue; // 不进行处理直接丢弃该数据包
+                }
+                else {
+                    memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
+                    size += temp.udp_header.datasize;
 
-                cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
-                // cout << file_content << endl;
+                    cout << "数据包SEQ：" << temp.udp_header.SEQ << endl;
+                    // cout << file_content << endl;
+
+                    Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
+                    seq_order++;
+                    check_seq();
+                }
             }
         }
         
         delete[] RecvBuf; // 一定要delete掉啊，否则不给堆区了
     }
+
+    stream_seq_order++;
+    check_stream_seq();
+    // 每一次获取文件后，将seq_order清零
+    seq_order = 0;
+    delete[] file_content;
 }
 
 bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
