@@ -19,8 +19,13 @@ using namespace std;
 const uint16_t SYN = 0x1;
 const uint16_t ACK = 0x2;
 const uint16_t SYN_ACK = 0x3;
-const uint16_t START = 0x10;
+const uint16_t START = 0x10;  
 const uint16_t OVER = 0x8;
+const uint16_t FIN = 0x4; 
+const uint16_t FIN_ACK = 0x6; 
+const uint16_t START_OVER = 0x18;
+
+int ready2quit = 0;
 
 struct HEADER {
     uint16_t datasize;
@@ -130,7 +135,7 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
 
                 cout << "文件名：" << filename << endl;
             }
-            else if (temp.udp_header.Flag == OVER) {
+            else if(temp.udp_header.Flag == OVER){
                 memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
                 size += temp.udp_header.datasize;
 
@@ -141,7 +146,15 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
                 ofstream fout(filename, ofstream::binary);
                 fout.write(file_content, size); // 这里还是size,如果使用string.data或c_str的话图片不显示，经典深拷贝问题
                 fout.close();
+
+                cout << "-------成功接收文件-------" << endl;
                 flag = false;
+            }
+            // START_OVER表征发送端断连
+            else if (temp.udp_header.Flag == START_OVER) {
+                flag = false;
+                ready2quit = 1; // 偷懒（全局变量标识准备进行四次挥手）
+                cout << "-------Sender马上断开连接！-------" << endl;
             }
             else {
                 memcpy(file_content + size, temp.buffer, temp.udp_header.datasize);
@@ -151,11 +164,9 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
                 // cout << file_content << endl;
             }
         }
-
+        
         delete[] RecvBuf; // 一定要delete掉啊，否则不给堆区了
     }
-
-    cout << "-------成功接收文件-------" << endl;
 }
 
 bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
@@ -233,6 +244,81 @@ bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
     return 1;
 }
 
+bool disConnect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
+    HEADER udp_header;
+    my_udp last_connect; 
+
+    int iResult = 0;
+    int SenderAddrSize = sizeof(SenderAddr);
+    char* disconnect_buffer = new char[UDP_LEN];
+    uint16_t last_Recv_Seq = 0x0; // 虽然没啥用，用来记录下+1的流程
+
+    while (true) {
+        iResult = recvfrom(RecvSocket, disconnect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, &SenderAddrSize);
+        if (iResult == SOCKET_ERROR) {
+            cout << "-------第一次挥手接收失败-------:(" << endl;
+            return 0;
+        }
+        else {
+            cout << "-------接收到第一次挥手消息，进行验证-------" << endl;
+        }
+        memcpy(&last_connect, disconnect_buffer, UDP_LEN);
+        if (last_connect.udp_header.Flag == FIN && last_connect.udp_header.SEQ == 0xFFFF && checksum((uint16_t*)&last_connect, UDP_LEN) == 0) {
+            last_Recv_Seq = last_connect.udp_header.SEQ + 1;
+            cout << "-------成功接收第一次挥手-------" << endl;
+            break;
+        }
+    }
+
+    // 发送第二次挥手ACK消息
+    memset(&last_connect, 0, UDP_LEN);
+    memset(disconnect_buffer, 0, UDP_LEN);
+    last_connect.udp_header.Flag = ACK;
+    last_connect.udp_header.SEQ = last_Recv_Seq; // 第二次挥手SEQ：0x0
+    last_connect.udp_header.cksum = checksum((uint16_t*)&last_connect, UDP_LEN);
+    memcpy(disconnect_buffer, &last_connect, UDP_LEN);
+
+    iResult = sendto(RecvSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&SenderAddr, SenderAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第二次挥手发送失败，已退出-------:(" << endl;
+        return 0;
+    }
+
+    // 发送第三次挥手的消息
+    memset(&last_connect, 0, UDP_LEN);
+    memset(disconnect_buffer, 0, UDP_LEN);
+    last_connect.udp_header.Flag = FIN_ACK;
+    last_connect.udp_header.SEQ = 0xFFFF; // 第三次挥手SEQ：0xFFFF
+    last_connect.udp_header.cksum = checksum((uint16_t*)&last_connect, UDP_LEN);
+    memcpy(disconnect_buffer, &last_connect, UDP_LEN);
+
+    iResult = sendto(RecvSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&SenderAddr, SenderAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第三次挥手发送失败，已退出-------:(" << endl;
+        return 0;
+    }
+
+    // 接收第四次的挥手消息
+    while (true) {
+        iResult = recvfrom(RecvSocket, disconnect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, &SenderAddrSize);
+        if (iResult == SOCKET_ERROR) {
+            cout << "-------第四次挥手接收失败-------:(" << endl;
+            return 0;
+        }
+        else {
+            cout << "-------接收到第四次挥手消息，进行验证-------" << endl;
+        }
+        memcpy(&last_connect, disconnect_buffer, UDP_LEN);
+        if (last_connect.udp_header.Flag == ACK && last_connect.udp_header.SEQ == 0x0 && checksum((uint16_t*)&last_connect, UDP_LEN) == 0) {
+            cout << "-------成功接收第四次挥手-------" << endl;
+            break;
+        }
+    }
+
+    cout << "-------成功完成四次挥手过程，断开连接！-------" << endl;
+    return 1;
+}
+
 int main()
 {
 
@@ -297,15 +383,25 @@ int main()
             break;
         }
         */
-
-        cout << endl;
-        recv_file(RecvSocket, SenderAddr, SenderAddrSize);
+        if (ready2quit == 0) {
+            cout << endl;
+            recv_file(RecvSocket, SenderAddr, SenderAddrSize);
+        }
+        else {
+            break; // 得到quit消息，退出循环进行四次断连过程
+        }
     }
 
     //-----------------------------------------------
     // 四次挥手断连
-
-
+    if (disConnect(RecvSocket, RecvAddr)) {
+        cout << "zzekun okk" << endl;
+    }
+    else {
+        cout << "kkkkkkk" << endl;
+        return 0;
+    }
+    
     //-----------------------------------------------
     // 断连完成后，关闭socket
     iResult = closesocket(RecvSocket);

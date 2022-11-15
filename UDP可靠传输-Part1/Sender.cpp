@@ -27,6 +27,7 @@ const uint16_t START = 0x10;  // 标记文件的第一个数据包，也就是文件名
 const uint16_t OVER = 0x8;  // 标记最后一个数据包
 const uint16_t FIN = 0x4; // FIN = 1 ACK = 0
 const uint16_t FIN_ACK = 0x6; // FIN = 1 ACK = 1
+const uint16_t START_OVER = 0x18; // START = 1 OVER = 1
 
 struct HEADER {
     uint16_t datasize;
@@ -46,7 +47,7 @@ struct HEADER {
         this->STREAM_SEQ = 0;
         this->SEQ = 0;
     }
-
+    
     HEADER(uint16_t datasize, uint16_t cksum, uint16_t Flag, uint16_t STREAM_SEQ, uint16_t SEQ) {
         this->datasize = datasize;
         this->cksum = cksum;
@@ -88,7 +89,7 @@ my_udp::my_udp(HEADER& header, string data_segment) {
     buffer[data_segment.length()] = '\0';
 };
 
-void my_udp::set_value(HEADER header, char* data_segment, int size) {
+void my_udp::set_value(HEADER header, char* data_segment , int size) {
     udp_header = header;
     memcpy(buffer, data_segment, size);
 }
@@ -116,7 +117,7 @@ void send_packet(my_udp& Packet, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     char* SendBuf = new char[UDP_LEN];
     memcpy(SendBuf, &Packet, UDP_LEN);
     iResult = sendto(SendSocket, SendBuf, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
-
+    
     // 直接把提示信息也封装进函数吧
     if (iResult == SOCKET_ERROR) {
         cout << "Sendto failed with error: " << WSAGetLastError() << endl;
@@ -145,7 +146,7 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     // 第一个数据包要发送文件名，并且先只标记START
     HEADER udp_header(filename.length(), 0, START, 0, 0);
     my_udp udp_packets(udp_header, filename.c_str());
-
+    
     // 测试校验和 sizeof(HEADER): 8  sizeof(my_udp): 4104 = 4096 + 8
     uint16_t check = checksum((uint16_t*)&udp_packets, UDP_LEN); // 计算校验和
 
@@ -168,7 +169,7 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             udp_packets.udp_header.cksum = check;
         }
         else {
-
+            
             udp_header.set_value(DEFAULT_BUFLEN, 0, 0, 0, (index + 1) % DEFAULT_SEQNUM);
             udp_packets.set_value(udp_header, binary_file_buf + index * DEFAULT_BUFLEN, DEFAULT_BUFLEN);
 
@@ -193,7 +194,7 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
 
     uint16_t temp = checksum((uint16_t*)&first_connect, UDP_LEN);
     first_connect.udp_header.cksum = temp;
-
+    
     // cout << endl;
     // cout << first_connect.udp_header.Flag << " " << first_connect.udp_header.SEQ << " " << first_connect.udp_header.cksum << endl;
     // cout << first_connect.udp_header.datasize << " " << first_connect.udp_header.STREAM_SEQ << endl;
@@ -236,11 +237,11 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     memcpy(&first_connect, connect_buffer, UDP_LEN);
     // 保存SYN_ACK的SEQ信息，完成k+1的验证
     uint16_t Recv_connect_Seq = 0x0;
-    if (first_connect.udp_header.Flag == SYN_ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF) {
+    if (first_connect.udp_header.Flag == SYN_ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF){
         Recv_connect_Seq = 0xFFFF; // first_connect.udp_header.SEQ
         cout << "-------完成第二次握手-------" << endl;
     }
-    else {
+    else{
         cout << "-------第二次握手发生错误，请重启发送端-------:(" << endl;
         return 0;
     }
@@ -283,7 +284,7 @@ bool disConnect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
         return 0;
     }
 
-    clock_t start = clock();
+    clock_t start = clock(); 
     u_long mode = 1;
     ioctlsocket(SendSocket, FIONBIO, &mode); // 设置成阻塞模式等待ACK响应
 
@@ -301,7 +302,8 @@ bool disConnect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
         }
     }
 
-    cout << "-------第一次挥手成功-------" << endl;
+    cout << "-------完成第一次挥手-------" << endl;
+    cout << "-------接收到第二次挥手消息，进行验证-------" << endl;
 
     memcpy(&last_connect, disconnect_buffer, UDP_LEN);
     if (last_connect.udp_header.Flag == ACK && checksum((uint16_t*)&last_connect, UDP_LEN) == 0 && last_connect.udp_header.SEQ == 0x0) {
@@ -319,6 +321,7 @@ bool disConnect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
         return 0;
     }
     else {
+        cout << "-------接收到第三次挥手消息，进行验证-------" << endl;
         memcpy(&last_connect, disconnect_buffer, UDP_LEN);
         if (last_connect.udp_header.Flag == FIN_ACK && checksum((uint16_t*)&last_connect, UDP_LEN) == 0 && last_connect.udp_header.SEQ == 0xFFFF) {
             cout << "-------完成第三次挥手-------" << endl;
@@ -386,7 +389,7 @@ int main()
     //---------------------------------------------
     // 发送数据包，需要注意的是如果发送文件需要多次，需要改进，特征字符串断开连接
     // iResult = sendto(SendSocket, SendBuf, DEFAULT_BUFLEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
-
+    
     //建立连接
     if (Connect(SendSocket, RecvAddr)) {
         cout << "zzekun okk" << endl;
@@ -407,6 +410,20 @@ int main()
         cin >> command;
         cout << endl;
         if (command == "quit") {
+            HEADER command_header;
+            command_header.set_value(4, 0, START_OVER, 0, 0);
+            my_udp command_udp(command_header);
+            char* command_buffer = new char[UDP_LEN];
+            memcpy(command_buffer, &command_udp, UDP_LEN);
+
+            if (sendto(SendSocket, command_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr)) == SOCKET_ERROR) {
+                cout << "-------quit命令发送失败-------" << endl;
+                return 0;
+            }
+            else {
+                cout << "-------quit命令发送成功-------" << endl;
+            }
+
             break;
         }
         else {
@@ -414,7 +431,7 @@ int main()
             continue;
         }
     }
-
+    
     //---------------------------------------------
     // 四次挥手断连，FIN
     if (disConnect(SendSocket, RecvAddr)) {
