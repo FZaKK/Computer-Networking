@@ -12,7 +12,7 @@ using namespace std;
 #define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 #define MAX_FILESIZE 1024 * 1024 * 10
-#define MAX_TIME 20
+#define MAX_TIME 0.5 * CLOCKS_PER_SEC
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -61,13 +61,12 @@ struct HEADER {
 class my_udp {
 public:
     HEADER udp_header;
-    char buffer[DEFAULT_BUFLEN + 1] = ""; // 虽然这里+1了，但是根本不影响4096的大小，因为\0不算strlen
+    char buffer[DEFAULT_BUFLEN] = ""; // 这里可以+1设置\0，也可以不+1
 public:
     my_udp() {};
     my_udp(HEADER& header);
     my_udp(HEADER& header, string data_segment);
     void set_value(HEADER header, char* data_segment, int size); // 这里一定要注意
-    uint16_t checksum() {};
 };
 
 // 针对三次握手和四次挥手的初始化函数
@@ -155,6 +154,8 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
 
         delete[] RecvBuf; // 一定要delete掉啊，否则不给堆区了
     }
+
+    cout << "-------成功接收文件-------" << endl;
 }
 
 bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
@@ -172,8 +173,17 @@ bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
             cout << "-------第一次握手接收失败-------:(" << endl;
             return 0;
         }
+        else {
+            cout << "-------接收到第一次握手消息，进行验证-------" << endl;
+        }
         memcpy(&first_connect, connect_buffer, UDP_LEN);
-        if (first_connect.udp_header.Flag == SYN && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF) {
+
+        // cout << first_connect.udp_header.Flag << " " << first_connect.udp_header.SEQ << " " << first_connect.udp_header.cksum << endl;
+        // cout << first_connect.udp_header.datasize << " " << first_connect.udp_header.STREAM_SEQ << endl;
+        // cout << first_connect.buffer << endl;
+        // cout << checksum((uint16_t*)&first_connect, UDP_LEN) << endl;
+
+        if (first_connect.udp_header.Flag == SYN && first_connect.udp_header.SEQ == 0xFFFF && checksum((uint16_t*)&first_connect, UDP_LEN) == 0) {
             cout << "-------成功接收第一次握手-------" << endl;
             break;
         }
@@ -197,7 +207,7 @@ bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
     // 接收第三次握手消息，超时重传
     while (recvfrom(RecvSocket, connect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, &SenderAddrSize) <= 0) {
         if (clock() - start > MAX_TIME) {
-            cout << "第二次握手超时，正在重传" << endl;
+            cout << "-------第二次握手超时，正在重传-------" << endl;
             iResult = sendto(RecvSocket, connect_buffer, UDP_LEN, 0, (sockaddr*)&SenderAddr, SenderAddrSize);
             if (iResult == SOCKET_ERROR) {
                 cout << "-------第二次握手发送失败，已退出-------:(" << endl;
@@ -207,8 +217,11 @@ bool Connect(SOCKET& RecvSocket, sockaddr_in& SenderAddr) {
         }
     }
 
+    cout << "-------第二次握手成功-------" << endl;
+
     // memset(&first_connect, 0, UDP_LEN);
     memcpy(&first_connect, connect_buffer, UDP_LEN);
+
     if (first_connect.udp_header.Flag == ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0) {
         cout << "-------成功建立通信！可以接收数据!-------" << endl;
     }
@@ -262,11 +275,39 @@ int main()
     }
 
     //-----------------------------------------------
-    // recvfrom接收socket上的数据，这里需要改成循环接收，等到发送端断开连接后关闭
-    recv_file(RecvSocket, SenderAddr, SenderAddrSize);
+    // 先Connect连接尝试一下
+    cout << "Waiting Connected..." << endl;
+    if (Connect(RecvSocket, RecvAddr)) {
+        cout << "zzekun okk" << endl;
+    }
+    else {
+        cout << "kkkkkkk" << endl;
+        return 0;
+    }
 
     //-----------------------------------------------
-    // 完成传输后，关闭socket
+    // recvfrom接收socket上的数据，这里需要改成循环接收，等到发送端断开连接后关闭
+    // recv_file(RecvSocket, SenderAddr, SenderAddrSize);
+    // 这里可以继续添加应用层协议内容，双线程设计
+    while (true) {
+        /*
+        string command;
+        cout << "-------可以输入quit命令退出客户端-------" << endl; // 补充四次挥手
+        if (cin >> command && command == "quit") {
+            break;
+        }
+        */
+
+        cout << endl;
+        recv_file(RecvSocket, SenderAddr, SenderAddrSize);
+    }
+
+    //-----------------------------------------------
+    // 四次挥手断连
+
+
+    //-----------------------------------------------
+    // 断连完成后，关闭socket
     iResult = closesocket(RecvSocket);
     if (iResult == SOCKET_ERROR) {
         cout << "Closesocket failed with error: " << WSAGetLastError() << endl;

@@ -4,7 +4,7 @@
 #include <fstream>
 #include <string>
 #include <cstring>
-#include <windows.h>
+#include <Windows.h>
 #include <time.h>
 using namespace std;
 
@@ -15,7 +15,7 @@ using namespace std;
 #define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 #define MAX_FILESIZE 1024 * 1024 * 10
-#define MAX_TIME 20
+#define MAX_TIME 0.5 * CLOCKS_PER_SEC // 超时重传
 
 // 连接上ws2_32.lib
 #pragma comment(lib, "Ws2_32.lib")
@@ -25,6 +25,8 @@ const uint16_t ACK = 0x2; // SYN = 0, ACK = 1，FIN = 0
 const uint16_t SYN_ACK = 0x3; // SYN = 1, ACK = 1
 const uint16_t START = 0x10;  // 标记文件的第一个数据包，也就是文件名
 const uint16_t OVER = 0x8;  // 标记最后一个数据包
+const uint16_t FIN = 0x4; // FIN = 1 ACK = 0
+const uint16_t FIN_ACK = 0x6; // FIN = 1 ACK = 1
 
 struct HEADER {
     uint16_t datasize;
@@ -121,6 +123,8 @@ void send_packet(my_udp& Packet, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
         closesocket(SendSocket);
         WSACleanup();
     }
+
+    delete[] SendBuf; // ?
 }
 
 void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
@@ -172,7 +176,7 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             udp_packets.udp_header.cksum = check;
         }
         send_packet(udp_packets, SendSocket, RecvAddr);
-        Sleep(MAX_TIME);
+        Sleep(10);
 
         // 图片二进制输出不了
         // cout << udp_packets.buffer << endl;
@@ -190,6 +194,12 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     uint16_t temp = checksum((uint16_t*)&first_connect, UDP_LEN);
     first_connect.udp_header.cksum = temp;
 
+    // cout << endl;
+    // cout << first_connect.udp_header.Flag << " " << first_connect.udp_header.SEQ << " " << first_connect.udp_header.cksum << endl;
+    // cout << first_connect.udp_header.datasize << " " << first_connect.udp_header.STREAM_SEQ << endl;
+    // cout << first_connect.buffer << endl;
+    // cout << checksum((uint16_t*)&first_connect, UDP_LEN) << endl;
+
     int iResult = 0;
     int RecvAddrSize = sizeof(RecvAddr);
     char* connect_buffer = new char[UDP_LEN];
@@ -203,7 +213,7 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
 
     clock_t start = clock(); //记录发送第一次握手发出时间
     u_long mode = 1;
-    ioctlsocket(SendSocket, FIONBIO, &mode); // 设置成阻塞模式等待ACK相应
+    ioctlsocket(SendSocket, FIONBIO, &mode); // 设置成阻塞模式等待ACK响应
 
     // 接收第二次握手ACK响应，其中的ACK应当为0xFFFF+1 = 0
     while (recvfrom(SendSocket, connect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, &RecvAddrSize) <= 0) {
@@ -213,11 +223,14 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             // memcpy(connect_buffer, &first_connect, UDP_LEN); // 这一句好像可以不用
             iResult = sendto(SendSocket, connect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, RecvAddrSize);
             if (iResult == SOCKET_ERROR) {
-                cout << "-------第一次握手重传失败，正在重传-------:(" << endl;
+                cout << "-------第一次握手重传失败，请重启发送端-------:(" << endl;
+                return 0;
             }
             start = clock(); // 重设时间
         }
     }
+
+    cout << "-------第一次握手发送成功-------" << endl;
 
     // 获取到了第二次握手的ACK消息，检查校验和，这时接收到的在connect_buffer之中
     memcpy(&first_connect, connect_buffer, UDP_LEN);
@@ -238,7 +251,7 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     first_connect.udp_header.Flag = ACK;
     first_connect.udp_header.SEQ = Recv_connect_Seq + 1; // 0
     first_connect.udp_header.cksum = checksum((uint16_t*)&first_connect, UDP_LEN);
-    memcpy(&first_connect, connect_buffer, UDP_LEN);
+    memcpy(connect_buffer, &first_connect, UDP_LEN);
 
     iResult = sendto(SendSocket, connect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, RecvAddrSize);
     if (iResult == SOCKET_ERROR) {
@@ -247,6 +260,90 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     }
 
     cout << "-------接收端成功连接！可以发送数据！-------" << endl;
+
+    delete[] connect_buffer;
+    return 1;
+}
+
+bool disConnect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
+    int iResult = 0;
+    int RecvAddrSize = sizeof(RecvAddr);
+    char* disconnect_buffer = new char[UDP_LEN];
+
+    HEADER udp_header;
+    udp_header.set_value(0, 0, FIN, 0, 0xFFFF); // 同样的四次挥手，这里的设计是序列号互相均发送0xFFFF
+    my_udp last_connect(udp_header); // 第一次FIN
+    uint16_t temp = checksum((uint16_t*)&last_connect, UDP_LEN);
+    last_connect.udp_header.cksum = temp;
+
+    memcpy(disconnect_buffer, &last_connect, UDP_LEN);// 深拷贝准备发送
+    iResult = sendto(SendSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, RecvAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第一次挥手发生错误，请重启发送端-------:(" << endl;
+        return 0;
+    }
+
+    clock_t start = clock();
+    u_long mode = 1;
+    ioctlsocket(SendSocket, FIONBIO, &mode); // 设置成阻塞模式等待ACK响应
+
+    // 接收第二次挥手
+    while (recvfrom(SendSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, &RecvAddrSize) <= 0) {
+        // rdt3.0: 超时重传
+        if (clock() - start > MAX_TIME) {
+            cout << "-------第一次挥手超时，正在重传-------:(" << endl;
+            iResult = sendto(SendSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, RecvAddrSize);
+            if (iResult == SOCKET_ERROR) {
+                cout << "-------第一次挥手重传失败，请重启发送端-------:(" << endl;
+                return 0;
+            }
+            start = clock(); // 重设时间
+        }
+    }
+
+    cout << "-------第一次挥手成功-------" << endl;
+
+    memcpy(&last_connect, disconnect_buffer, UDP_LEN);
+    if (last_connect.udp_header.Flag == ACK && checksum((uint16_t*)&last_connect, UDP_LEN) == 0 && last_connect.udp_header.SEQ == 0x0) {
+        cout << "-------完成第二次挥手-------" << endl;
+    }
+    else {
+        cout << "-------第二次挥手发生错误，请重启发送端-------:(" << endl;
+        return 0;
+    }
+
+    // 第三次挥手等待接收消息
+    iResult = recvfrom(SendSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, &RecvAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第三次挥手发生错误，请重启发送端-------:(" << endl;
+        return 0;
+    }
+    else {
+        memcpy(&last_connect, disconnect_buffer, UDP_LEN);
+        if (last_connect.udp_header.Flag == FIN_ACK && checksum((uint16_t*)&last_connect, UDP_LEN) == 0 && last_connect.udp_header.SEQ == 0xFFFF) {
+            cout << "-------完成第三次挥手-------" << endl;
+        }
+        else {
+            cout << "-------第三次挥手发生错误，请重启发送端-------:(" << endl;
+            return 0;
+        }
+    }
+
+    // 发送第四次挥手消息
+    memset(&last_connect, 0, UDP_LEN);
+    memset(disconnect_buffer, 0, UDP_LEN);
+    last_connect.udp_header.Flag = ACK;
+    last_connect.udp_header.SEQ = 0x0;
+    last_connect.udp_header.cksum = checksum((uint16_t*)&last_connect, UDP_LEN);
+
+    memcpy(disconnect_buffer, &last_connect, UDP_LEN);
+    iResult = sendto(SendSocket, disconnect_buffer, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, RecvAddrSize);
+    if (iResult == SOCKET_ERROR) {
+        cout << "-------第三次挥手发生错误，请重启发送端-------:(" << endl;
+        return 0;
+    }
+
+    cout << "-------完成第四次挥手-------" << endl;
     return 1;
 }
 
@@ -290,10 +387,43 @@ int main()
     // 发送数据包，需要注意的是如果发送文件需要多次，需要改进，特征字符串断开连接
     // iResult = sendto(SendSocket, SendBuf, DEFAULT_BUFLEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
 
-    string filename;
-    cout << "请输入想要发送的文件路径：" << endl;
-    cin >> filename;
-    send_file(filename, SendSocket, RecvAddr);
+    //建立连接
+    if (Connect(SendSocket, RecvAddr)) {
+        cout << "zzekun okk" << endl;
+    }
+    else {
+        cout << "kkkkkkk" << endl;
+        return 0;
+    }
+
+    //---------------------------------------------
+    // Send发送阶段，可以设计为双线程，send和recv都为双线程
+    // HANDLE hThread[2];
+    // hThread[0] = CreateThread(NULL, 0, Recv, (LPVOID)&ConnectSocket, 0, NULL);
+    // hThread[1] = CreateThread(NULL, 0, Send, (LPVOID)&ConnectSocket, 0, NULL);
+    while (true) {
+        string command;
+        cout << "-------请输入想要发送的文件名-------" << endl;
+        cin >> command;
+        cout << endl;
+        if (command == "quit") {
+            break;
+        }
+        else {
+            send_file(command, SendSocket, RecvAddr);
+            continue;
+        }
+    }
+
+    //---------------------------------------------
+    // 四次挥手断连，FIN
+    if (disConnect(SendSocket, RecvAddr)) {
+        cout << "zzekun okk" << endl;
+    }
+    else {
+        cout << "kkkkkkk" << endl;
+        return 0;
+    }
 
     //---------------------------------------------
     // 当完成了相关的传输工作后，关闭socket，考虑可以补充选择文件传输
