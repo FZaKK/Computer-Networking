@@ -12,7 +12,7 @@ using namespace std;
 #define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 #define MAX_FILESIZE 1024 * 1024 * 10
-#define MAX_TIME 0.5 * CLOCKS_PER_SEC
+#define MAX_TIME 0.2 * CLOCKS_PER_SEC
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -168,13 +168,17 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
         else {
             memcpy(&temp, RecvBuf, UDP_LEN);
 
-            // cout << "校验和：" << temp.udp_header.cksum << endl;
-            // cout << "检验：" << checksum((uint16_t*)&temp, UDP_LEN) << endl;
+            // 仅作为测试
+            int drop_probability = rand() % 10;
+            cout << drop_probability << endl;
+            if (drop_probability < 1) {
+                continue;
+            }
 
             if (temp.udp_header.Flag == START) {
                 // 出问题了
                 if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) {
-                    cout << " *** Something wrong!! Wait ReSend!! *** " << endl;
+                    cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
                 }
@@ -190,7 +194,7 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
             }
             else if(temp.udp_header.Flag == OVER){
                 if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) { 
-                    cout << " *** Something wrong!! Wait ReSend!! *** " << endl;
+                    cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
                 }
@@ -224,7 +228,7 @@ void recv_file(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrSize)
             else {
                 // 这里可以封装一个Send_ACK
                 if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) {
-                    cout << " *** Something wrong!! Wait ReSend!! *** " << endl;
+                    cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
                 }

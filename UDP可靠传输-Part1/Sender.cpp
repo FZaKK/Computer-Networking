@@ -14,7 +14,7 @@ using namespace std;
 #define DEFAULT_SEQNUM 65536
 #define UDP_LEN sizeof(my_udp)
 #define MAX_FILESIZE 1024 * 1024 * 10
-#define MAX_TIME 0.5 * CLOCKS_PER_SEC // 超时重传
+#define MAX_TIME 0.2 * CLOCKS_PER_SEC // 超时重传
 
 // 连接上ws2_32.lib
 #pragma comment(lib, "Ws2_32.lib")
@@ -30,6 +30,7 @@ const uint16_t START_OVER = 0x18; // START = 1 OVER = 1
 
 uint16_t seq_order = 0;
 uint16_t stream_seq_order = 0;
+long file_size = 0;
 
 struct HEADER {
     uint16_t datasize;
@@ -147,26 +148,40 @@ void send_packet(my_udp& Packet, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     // 记录发送时间，超时重传
     // 等待接收ACK信息，验证序列号
     clock_t start = clock(); 
-
-    u_long mode = 1;
-    ioctlsocket(SendSocket, FIONBIO, &mode);
-    while (1 == 1) {
+    // u_long mode = 1;
+    // ioctlsocket(SendSocket, FIONBIO, &mode);
+    
+    while (true) {
         while (recvfrom(SendSocket, RecvBuf, UDP_LEN, 0, (sockaddr*)&RecvAddr, &RecvAddrSize) <= 0) {
-            if (clock() - start > MAX_TIME) {
-                cout << " *** TIME OUT! ReSend Message *** " << endl;
-                iResult = sendto(SendSocket, SendBuf, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
-                start = clock(); // 重设开始时间
-                if (iResult == SOCKET_ERROR) {
-                    cout << "Sendto failed with error: " << WSAGetLastError() << endl;
-                    closesocket(SendSocket);
-                    WSACleanup();
-                }
+        // iResult = recvfrom(SendSocket, RecvBuf, UDP_LEN, 0, (sockaddr*)&RecvAddr, &RecvAddrSize);
+        // if (iResult == -1) {
+            // cout << "Recvfrom failed with error: " << WSAGetLastError() << endl;
+        // }
+
+        if (clock() - start > MAX_TIME) {
+            cout << "*** TIME OUT! ReSend Message *** " << endl;
+
+            // 仅作为调试
+            Packet.udp_header.SEQ = seq_order;
+            memcpy(SendBuf, &Packet, UDP_LEN);
+            iResult = sendto(SendSocket, SendBuf, UDP_LEN, 0, (SOCKADDR*)&RecvAddr, sizeof(RecvAddr));
+            
+            cout << "ReSend Message " << Packet.udp_header.datasize << " bytes!";
+            cout << " Flag:" << Packet.udp_header.Flag << " STREAM_SEQ:" << Packet.udp_header.STREAM_SEQ << " SEQ:" << Packet.udp_header.SEQ;
+            cout << " Check Sum:" << Packet.udp_header.cksum << endl;
+
+            start = clock(); // 重设开始时间
+            if (iResult == SOCKET_ERROR) {
+                cout << "Sendto failed with error: " << WSAGetLastError() << endl;
+                // closesocket(SendSocket);
+                // WSACleanup();
             }
         }
+        }
 
-        // 三个条件要同时满足
+        // 三个条件要同时满足，这里调试时判断用packet的seq
         memcpy(&Recv_udp, RecvBuf, UDP_LEN);
-        if (Recv_udp.udp_header.SEQ == seq_order && Recv_udp.udp_header.Flag == ACK && checksum((uint16_t*)&Recv_udp, UDP_LEN) == 0) {
+        if (Recv_udp.udp_header.SEQ == Packet.udp_header.SEQ && Recv_udp.udp_header.Flag == ACK && checksum((uint16_t*)&Recv_udp, UDP_LEN) == 0) {
             cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
             seq_order++; // 全局变量的序列号
             check_seq();
@@ -176,8 +191,8 @@ void send_packet(my_udp& Packet, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             continue;
         }
     }
-    mode = 0;
-    ioctlsocket(SendSocket, FIONBIO, &mode);//改回阻塞模式
+    // mode = 0;
+    // ioctlsocket(SendSocket, FIONBIO, &mode);
 
     delete[] SendBuf; // ?
     delete[] RecvBuf;
@@ -193,6 +208,7 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     // 获取文件大小
     fin.seekg(0, std::ifstream::end);
     long size = fin.tellg();
+    file_size = size;
     fin.seekg(0);
 
     char* binary_file_buf = new char[size];
@@ -231,7 +247,18 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             check = checksum((uint16_t*)&udp_packets, UDP_LEN);
             udp_packets.udp_header.cksum = check;
         }
-        send_packet(udp_packets, SendSocket, RecvAddr);
+
+        // 增加测试部分，80%的概率按照正确的进行发送，20%的概率按照错误的进行发送
+        int error_probability = rand() % 10;
+        if (error_probability < 1) {
+            cout << error_probability << endl;
+            udp_packets.udp_header.SEQ++; // 手动添加错误
+            send_packet(udp_packets, SendSocket, RecvAddr);
+        }
+        else {
+            cout << error_probability << endl;
+            send_packet(udp_packets, SendSocket, RecvAddr);
+        }
         Sleep(10);
 
         // 图片二进制输出不了
@@ -418,9 +445,6 @@ int main()
     SOCKET SendSocket = INVALID_SOCKET;
     sockaddr_in RecvAddr;
 
-    // 确定发送缓冲区的长度为1024
-    // char SendBuf[DEFAULT_BUFLEN] = "zzekun";
-
     //----------------------
     // 初始化WinSock
     iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -443,6 +467,7 @@ int main()
     RecvAddr.sin_family = AF_INET;
     RecvAddr.sin_port = htons(DEFAULT_PORT);
     inet_pton(AF_INET, DEFAULT_IP, &RecvAddr.sin_addr.s_addr);
+
 
     //---------------------------------------------
     // 发送数据包，需要注意的是如果发送文件需要多次，需要改进，特征字符串断开连接
@@ -487,7 +512,11 @@ int main()
             break;
         }
         else {
+            clock_t start = clock();
             send_file(command, SendSocket, RecvAddr);
+            clock_t end = clock();
+            cout << "**传输文件时间为：" << (end - start) / CLOCKS_PER_SEC << "s" << endl;
+            cout << "**吞吐率为:" << ((float)file_size) / ((end - start) / CLOCKS_PER_SEC) << " bytes/s " << endl << endl;
             continue;
         }
     }
