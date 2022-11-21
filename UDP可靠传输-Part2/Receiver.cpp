@@ -175,8 +175,8 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
             }
 
             if (temp.udp_header.Flag == START) {
-                // 验证未通过
-                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order) {
+                // 验证未通过，uint16_t是为了处理SEQ回环的
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != uint16_t(seq_order + 1)) {
                     cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
@@ -186,12 +186,13 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
                     cout << "*** 文件名：" << filename << endl;
 
                     print_Recv_information(temp);
+                    // 发送ACK0的响应即可
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
-                    check_seq();
+                    // check_seq();
                 }
             }
             else if (temp.udp_header.Flag == OVER) {
-                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order + 1) {
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != uint16_t(seq_order + 1)) {
                     cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
@@ -206,7 +207,8 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
                     fout.close();
                     flag = false;
 
-                    if (temp.udp_header.SEQ = seq_order + 1) {
+                    // SEQ回环
+                    if (temp.udp_header.SEQ = uint16_t(seq_order + 1)) {
                         seq_order++;
                     }
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
@@ -223,7 +225,7 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
             }
             else {
                 // 这里可以封装一个Send_ACK
-                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != seq_order + 1) {
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != uint16_t(seq_order + 1)) {
                     cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
@@ -234,12 +236,10 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
 
                     print_Recv_information(temp);
                     // 保留已经确认的分组的最后一个的序列号
-                    if (temp.udp_header.SEQ = seq_order + 1) {
+                    if (temp.udp_header.SEQ = uint16_t(seq_order + 1)) {
                         seq_order++;
                     }
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
-
-                    check_seq();
                 }
             }
         }

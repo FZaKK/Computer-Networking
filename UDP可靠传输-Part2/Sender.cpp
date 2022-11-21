@@ -252,11 +252,16 @@ void send_file_GBN(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     char* RecvBuf = new char[UDP_LEN];
     my_udp Recv_udp;
     start = clock();
+
+    // 处理SEQ回环，mod运算，商和余数
+    // uint16_t quotient = 0;
+    uint16_t remainder = 0;
     while (ACK_index < packet_num) {
         if (next_seqnum < base + N && next_seqnum <= packet_num) {
+            // quotient = next_seqnum / DEFAULT_SEQNUM;
+            remainder = next_seqnum % DEFAULT_SEQNUM;
             if (next_seqnum == packet_num) {
-                // 可以封装
-                udp_header.set_value(size - (next_seqnum - 1) * DEFAULT_BUFLEN, 0, OVER, stream_seq_order, next_seqnum);
+                udp_header.set_value(size - (next_seqnum - 1) * DEFAULT_BUFLEN, 0, OVER, stream_seq_order, remainder);
                 udp_packets.set_value(udp_header, binary_file_buf + (next_seqnum - 1) * DEFAULT_BUFLEN, size - (next_seqnum - 1) * DEFAULT_BUFLEN);
                 check = checksum((uint16_t*)&udp_packets, UDP_LEN);
                 udp_packets.udp_header.cksum = check;
@@ -267,7 +272,7 @@ void send_file_GBN(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
                 next_seqnum++;
             }
             else {
-                udp_header.set_value(DEFAULT_BUFLEN, 0, 0, stream_seq_order, next_seqnum);
+                udp_header.set_value(DEFAULT_BUFLEN, 0, 0, stream_seq_order, remainder);
                 udp_packets.set_value(udp_header, binary_file_buf + (next_seqnum - 1) * DEFAULT_BUFLEN, DEFAULT_BUFLEN);
                 check = checksum((uint16_t*)&udp_packets, UDP_LEN);
                 udp_packets.udp_header.cksum = check;
@@ -298,9 +303,9 @@ void send_file_GBN(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
             if (Recv_udp.udp_header.Flag == ACK && checksum((uint16_t*)&Recv_udp, UDP_LEN) == 0) {
                 cout << "base: " << base << endl;
                 cout << "nextseqnum " << next_seqnum << endl;
-                // 丢弃重复响应的ACK
-                if (base == Recv_udp.udp_header.SEQ) {
-                    base = Recv_udp.udp_header.SEQ + 1;
+                // 丢弃重复响应的ACK，取模防止回环问题
+                if ((base % DEFAULT_SEQNUM) == Recv_udp.udp_header.SEQ) {
+                    base = base + 1; // 确认一个移动一个位置
                     cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
                     cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
                     ACK_index++;
