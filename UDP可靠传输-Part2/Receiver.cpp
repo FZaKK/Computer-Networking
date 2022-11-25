@@ -176,7 +176,7 @@ void recv_file_GBN(SOCKET& RecvSocket, sockaddr_in& SenderAddr, int& SenderAddrS
 
             if (temp.udp_header.Flag == START) {
                 // 验证未通过，uint16_t是为了处理SEQ回环的
-                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != uint16_t(seq_order + 1)) {
+                if (checksum((uint16_t*)&temp, UDP_LEN) != 0 || temp.udp_header.SEQ != uint16_t(seq_order)) {
                     cout << "*** Something wrong!! Wait ReSend!! *** " << endl;
                     Send_ACK(RecvSocket, SenderAddr, SenderAddrSize);
                     continue; // 不进行处理直接丢弃该数据包
