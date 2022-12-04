@@ -355,6 +355,8 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                         base = base + 1; // 确认一个移动一个位置
                         cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
                         cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
                         ACK_index++;
                         message_queue.pop();
                         start = clock();
@@ -398,7 +400,7 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                     // 丢弃重复响应的ACK，取模防止回环问题
                     if ((base % DEFAULT_SEQNUM) == Recv_udp.udp_header.SEQ) {
                         RTT_ACK++;
-                        // 这里设置cwnd或者10应该都可以
+                        // 这里设置cwnd或者给定值应该都可以，但是cwnd快
                         if (RTT_ACK == cwnd) {
                             cwnd++;
                             N = min(cwnd, recv_window); // 需要更新发送窗口大小
@@ -410,6 +412,8 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                         base = base + 1; // 确认一个移动一个位置
                         cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
                         cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
                         ACK_index++;
                         message_queue.pop();
                         start = clock();
@@ -468,6 +472,8 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                         cwnd++; // 成功接收就是网络状态好呗
                         cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
                         cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
                         ACK_index++;
                         message_queue.pop();
                         start = clock();
