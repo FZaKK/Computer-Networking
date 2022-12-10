@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <time.h>
 #include <queue>
+#include <mutex>
 using namespace std;
 
 #define WIN32_LEAN_AND_MEAN
@@ -51,7 +52,7 @@ struct HEADER {
         this->STREAM_SEQ = 0;
         this->SEQ = 0;
     }
-    
+
     HEADER(uint16_t datasize, uint16_t cksum, uint16_t Flag, uint16_t STREAM_SEQ, uint16_t SEQ) {
         this->datasize = datasize;
         this->cksum = cksum;
@@ -93,7 +94,7 @@ my_udp::my_udp(HEADER& header, string data_segment) {
     buffer[data_segment.length()] = '\0';
 };
 
-void my_udp::set_value(HEADER header, char* data_segment , int size) {
+void my_udp::set_value(HEADER header, char* data_segment, int size) {
     udp_header = header;
     memcpy(buffer, data_segment, size);
 }
@@ -226,6 +227,8 @@ int ssthresh = 16; // 阈值
 int dupACKcount = 0; // 重复ACK计数
 int RenoState = 0; // 标志状态机  0：慢启动 1：拥塞避免 2：快速恢复
 uint16_t recover = 1;
+clock_t start; // 超时重传计时器
+int packet_num = 0;
 
 void Reno_init() {
     base = 1;
@@ -235,6 +238,430 @@ void Reno_init() {
     recv_window = 2560;
     dupACKcount = 0;
     RenoState = 0;
+}
+
+struct Send_params {
+    string filename;
+    SOCKET SendSocket;
+    sockaddr_in RecvAddr;
+    Send_params(string f, SOCKET s, sockaddr_in r) {
+        filename = f;
+        SendSocket = s;
+        RecvAddr = r;
+    }
+};
+
+mutex slock;
+
+DWORD WINAPI Send(LPVOID lparam_send) {
+    // 先传入参数
+    // cout << "send" << endl;
+    Send_params* S_params = (Send_params*)lparam_send;
+    string filename = S_params->filename;
+    SOCKET SendSocket = S_params->SendSocket;
+    sockaddr_in RecvAddr = S_params->RecvAddr;
+
+    int RecvAddrSize = sizeof(RecvAddr);
+
+    ifstream fin(filename.c_str(), ifstream::binary);
+    fin.seekg(0, std::ifstream::end);
+    long size = fin.tellg();
+    file_size = size;
+    fin.seekg(0);
+
+    char* binary_file_buf = new char[size];
+    cout << " ** 文件大小：" << size << " bytes" << endl;
+    fin.read(&binary_file_buf[0], size);
+    fin.close();
+
+    HEADER udp_header(filename.length(), 0, START, stream_seq_order, 0);
+    my_udp udp_packets(udp_header, filename.c_str());
+    uint16_t check = checksum((uint16_t*)&udp_packets, UDP_LEN); // 计算校验和
+    udp_packets.udp_header.cksum = check;
+    // packet_num = size / DEFAULT_BUFLEN + 1;
+    cout << " ** 文件名校验和：" << check << endl;
+    cout << " ** 发送数据包的数量：" << packet_num << endl;
+    cout << " ** Windows窗口大小：" << N << endl;
+
+    // 正常发送第一个文件名数据包
+    send_packet(udp_packets, SendSocket, RecvAddr);
+
+    // char* RecvBuf = new char[UDP_LEN];
+    // my_udp Recv_udp;
+    start = clock();
+
+    // 处理SEQ回环，mod运算，商和余数
+    // uint16_t quotient = 0;
+    uint16_t remainder = 0;
+    while (ACK_index < packet_num) {
+        // slock.lock();
+        if (next_seqnum < base + N && next_seqnum <= packet_num) {
+            // quotient = next_seqnum / DEFAULT_SEQNUM;
+            slock.lock();
+            remainder = next_seqnum % DEFAULT_SEQNUM;
+            if (next_seqnum == packet_num) {
+                udp_header.set_value(size - (next_seqnum - 1) * DEFAULT_BUFLEN, 0, OVER, stream_seq_order, remainder);
+                udp_packets.set_value(udp_header, binary_file_buf + (next_seqnum - 1) * DEFAULT_BUFLEN, size - (next_seqnum - 1) * DEFAULT_BUFLEN);
+                check = checksum((uint16_t*)&udp_packets, UDP_LEN);
+                udp_packets.udp_header.cksum = check;
+
+                // cout << "send window size: " << N << endl;
+                send_packet_GBN(udp_packets, SendSocket, RecvAddr);
+                print_Send_information(udp_packets, "Send");
+                message_queue.push(udp_packets);
+                next_seqnum++;
+            }
+            else {
+                udp_header.set_value(DEFAULT_BUFLEN, 0, 0, stream_seq_order, remainder);
+                udp_packets.set_value(udp_header, binary_file_buf + (next_seqnum - 1) * DEFAULT_BUFLEN, DEFAULT_BUFLEN);
+                check = checksum((uint16_t*)&udp_packets, UDP_LEN);
+                udp_packets.udp_header.cksum = check;
+
+                // cout << "send window size: " << N << endl;
+                send_packet_GBN(udp_packets, SendSocket, RecvAddr);
+                print_Send_information(udp_packets, "Send");
+                message_queue.push(udp_packets);
+                next_seqnum++;
+            }
+            slock.unlock();
+        }
+        
+        // 使用同一个socket进行发送
+        if (clock() - start > MAX_TIME) {
+            cout << "*** TIME OUT! ReSend Message *** " << endl;
+            ssthresh = cwnd / 2; // 阈值
+            cwnd = 1;
+            dupACKcount = 0; // 重新计数
+            N = min(cwnd, recv_window);
+            RenoState = 0; // 慢启动阶段
+            cout << "*** 进入慢启动阶段 窗口大小重设为" << N << " ***" << endl;
+            start = clock();
+
+            // 依旧是超时重传，全部重发 !!修改一下策略
+            // uint16_t front_seq = base;
+            slock.lock();
+            for (int i = 0; i < message_queue.size(); i++) {
+                send_packet_GBN(message_queue.front(), SendSocket, RecvAddr);
+                print_Send_information(message_queue.front(), "ReSend");
+                message_queue.push(message_queue.front());
+                message_queue.pop();
+                int j = 0;
+                while (j < 50) {
+                    j++;
+                }
+            }
+            slock.unlock();
+        }
+        // slock.unlock();
+    }
+    delete[] binary_file_buf;
+    return 0;
+}
+
+struct Recv_params {
+    SOCKET SendSocket;
+    sockaddr_in RecvAddr;
+    Recv_params(SOCKET s, sockaddr_in r) {
+        SendSocket = s;
+        RecvAddr = r;
+    }
+};
+
+DWORD WINAPI Recv(LPVOID lparam_recv) {
+    Recv_params* R_params = (Recv_params*)lparam_recv;
+    SOCKET SendSocket = R_params->SendSocket;
+    sockaddr_in RecvAddr = R_params->RecvAddr;
+    int RecvAddrSize = sizeof(RecvAddr);
+    int RTT_ACK = 0;
+    char* RecvBuf = new char[UDP_LEN];
+    my_udp Recv_udp;
+    // int flag = 0;
+
+    // cout << "recv" << endl;
+    // cout << "ACK_index: " << ACK_index << " packet_num: " << packet_num << endl;
+    while (ACK_index < packet_num) {
+        // slock.lock();
+        // 循环之中也接收ACK消息，可封装
+        // cout << "begin" << endl;
+        slock.lock();
+        if (recvfrom(SendSocket, RecvBuf, UDP_LEN, 0, (sockaddr*)&RecvAddr, &RecvAddrSize) > 0) {
+            // cout << "okk recv" << endl;
+            memcpy(&Recv_udp, RecvBuf, UDP_LEN);
+
+            // 没有校验和的错误
+            if (Recv_udp.udp_header.Flag == ACK && checksum((uint16_t*)&Recv_udp, UDP_LEN) == 0) {
+                switch (RenoState) {
+                    // 慢启动
+                case 0:
+                    cout << "***** 慢启动阶段 *****" << endl;
+                    cout << "Send Window Size: " << N << endl;
+                    cout << "base: " << base << endl;
+                    cout << "nextseqnum " << next_seqnum << endl;
+                    // 丢弃重复响应的ACK，取模防止回环问题
+                    if ((base % DEFAULT_SEQNUM) == Recv_udp.udp_header.SEQ) {
+                        if (cwnd < ssthresh) {
+                            cwnd++;
+                            N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                            cout << "*** 慢启动阶段接收到新ACK，cwnd++ ***" << endl;
+                        }
+                        else {
+                            RenoState = 1;
+                            cout << "*** 慢启动阶段结束，进入拥塞避免阶段 ***" << endl;
+                        }
+
+                        dupACKcount = 0; // 接收新的ACK，dup=0
+                        base = base + 1; // 确认一个移动一个位置
+                        cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
+                        ACK_index++;
+                        message_queue.pop();
+                        start = clock();
+                    }
+                    // 重复的ACK
+                    else {
+                        dupACKcount++;
+                        cout << "Repetitive ACK! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        cout << "dupACKcount: " << dupACKcount << endl;
+                    }
+                    // 重复三次ACK
+                    if (dupACKcount == 3) {
+                        // 检测到丢包，开始提前重传
+                        cout << "*** ACK重复三次，开始重传 ***" << endl;
+                        start = clock();
+                        for (int i = 0; i < message_queue.size(); i++) {
+                            send_packet_GBN(message_queue.front(), SendSocket, RecvAddr);
+                            print_Send_information(message_queue.front(), "ReSend");
+                            message_queue.push(message_queue.front());
+                            message_queue.pop();
+                            int j = 0;
+                            while (j < 50) {
+                                j++;
+                            }
+                            // Sleep(10);
+                        }
+                        // 快速恢复阶段
+                        ssthresh = cwnd / 2;
+                        cwnd = ssthresh + 3;
+                        RenoState = 2;
+                        recover = message_queue.back().udp_header.SEQ;
+                        dupACKcount = 0;
+                        N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                    }
+                    break;
+
+                    // 拥塞避免阶段
+                case 1:
+                    cout << "***** 拥塞避免阶段 *****" << endl;
+                    cout << "Send Window Size: " << N << endl;
+                    // cout << "RTT_ACK: " << RTT_ACK << endl;
+                    cout << "base: " << base << endl;
+                    cout << "nextseqnum " << next_seqnum << endl;
+                    // 丢弃重复响应的ACK，取模防止回环问题
+                    if ((base % DEFAULT_SEQNUM) == Recv_udp.udp_header.SEQ) {
+                        RTT_ACK++;
+                        // 这里设置cwnd或者给定值应该都可以，但是cwnd快
+                        if (RTT_ACK == cwnd) {
+                            cwnd++;
+                            N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                            RTT_ACK = 0;
+                            cout << "*** 拥塞避免阶段，线性递增+1 ***" << endl;
+                        }
+
+                        dupACKcount = 0; // 接收新的ACK，dup=0
+                        base = base + 1; // 确认一个移动一个位置
+                        cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
+                        ACK_index++;
+                        message_queue.pop();
+                        start = clock();
+                    }
+                    // 重复的ACK
+                    else {
+                        dupACKcount++;
+                        RTT_ACK = 0; // 保证RTT_ACK值的正确性
+                        cout << "Repetitive ACK! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        cout << "dupACKcount: " << dupACKcount << endl;
+                    }
+                    if (dupACKcount == 3) {
+                        // 检测到丢包，开始提前重传
+                        cout << "*** ACK重复三次，开始重传 ***" << endl;
+                        start = clock();
+                        for (int i = 0; i < message_queue.size(); i++) {
+                            send_packet_GBN(message_queue.front(), SendSocket, RecvAddr);
+                            print_Send_information(message_queue.front(), "ReSend");
+                            message_queue.push(message_queue.front());
+                            message_queue.pop();
+                            int j = 0;
+                            while (j < 50) {
+                                j++;
+                            }
+                            // Sleep(10);
+                        }
+                        ssthresh = cwnd / 2;
+                        cwnd = ssthresh + 3;
+                        RenoState = 2; // 快速恢复阶段
+                        recover = message_queue.back().udp_header.SEQ; // 设置New Reno的覆盖
+                        RTT_ACK = 0;
+                        dupACKcount = 0;
+                        N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                    }
+                    break;
+
+                    // 快速恢复阶段
+                case 2:
+                    cout << "***** 快速恢复阶段 *****" << endl;
+                    cout << "Send Window Size: " << N << endl;
+                    cout << "base: " << base << endl;
+                    cout << "nextseqnum " << next_seqnum << endl;
+                    // 所以要保留之前传输的最大序列号
+                    // uint16_t recover = next_seqnum - 1;
+                    if ((base % DEFAULT_SEQNUM) == Recv_udp.udp_header.SEQ) {
+                        // 新的ACK，New Reno会去判断是否发送的消息都已经被确认
+                        if (Recv_udp.udp_header.SEQ < recover) {
+                            RenoState = 2; // 维持快速恢复
+                        }
+                        else {
+                            RenoState = 1; // 进入拥塞避免阶段
+                            cwnd = ssthresh;
+                            N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                            // dupACKcount = 0;
+                        }
+
+                        dupACKcount = 0;
+                        base = base + 1; // 确认一个移动一个位置
+                        cwnd++; // 成功接收就是网络状态好呗
+                        cout << "Send has been confirmed! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                        recv_window--;
+                        N = min(cwnd, recv_window);
+                        ACK_index++;
+                        message_queue.pop();
+                        start = clock();
+                    }
+                    else {
+                        // 要是这块儿卡住了，要是这块儿卡住了就返回慢启动吧(不行）
+                        // 要是不返回慢启动的话，会导致快速恢复阶段时间过长，阻塞窗口过大
+                        dupACKcount++;
+                        /*
+                        // 这儿真的有待思考
+                        if (dupACKcount <= 3)
+                            cwnd++;
+                        else;
+                        */
+                        N = min(cwnd, recv_window); // 需要更新发送窗口大小
+                        cout << "*** 快速恢复阶段，cwnd: " << cwnd << endl;
+                        cout << "Repetitive ACK! Flag:" << Recv_udp.udp_header.Flag;
+                        cout << " STREAM_SEQ:" << Recv_udp.udp_header.STREAM_SEQ << " SEQ:" << Recv_udp.udp_header.SEQ << endl;
+                    }
+                    // 重复六次ACK，宽容一点
+                    if (dupACKcount == 6) {
+                        // 检测到快速恢复阶段还在丢包，那么直接进入慢启动
+                        cout << "*** ACK重复六次，进入慢启动 ***" << endl;
+                        ssthresh = cwnd / 2; // 阈值
+                        cwnd = 1;
+                        dupACKcount = 0; // 重新计数
+                        N = min(cwnd, recv_window);
+                        RenoState = 0; // 慢启动阶段
+                        cout << "*** 重新进入慢启动阶段 窗口大小重设为" << N << " ***" << endl;
+                        start = clock();
+
+                        for (int i = 0; i < message_queue.size(); i++) {
+                            send_packet_GBN(message_queue.front(), SendSocket, RecvAddr);
+                            print_Send_information(message_queue.front(), "ReSend");
+                            message_queue.push(message_queue.front());
+                            message_queue.pop();
+                            int j = 0;
+                            while (j < 50) {
+                                j++;
+                            }
+                            // Sleep(10);
+                        }
+                    }
+                    break;
+
+                default:
+                    cout << "Error RenoState!!!" << endl;
+                    break;
+                }
+            }
+            else;
+        }
+        slock.unlock();
+    }
+    cout << "----- ***对方已成功接收文件！***----- " << endl << endl;
+    stream_seq_order++;
+    check_stream_seq();
+    packet_num = 0;
+    return 0;
+}
+
+// 好像不需要计时器线程，计时器线程可能会导致两处socket内存同时发送会出现响应竞争
+DWORD WINAPI Timer(LPVOID lparam_timer) {
+    Recv_params* R_params = (Recv_params*)lparam_timer;
+    SOCKET SendSocket = R_params->SendSocket;
+    sockaddr_in RecvAddr = R_params->RecvAddr;
+    
+    while (ACK_index < packet_num) {
+        // 超时重传计时器超时了，也就是说很久没收到ACK数据包了
+        slock.lock();
+        if (clock() - start > MAX_TIME) {
+            cout << "*** TIME OUT! ReSend Message *** " << endl;
+            ssthresh = cwnd / 2; // 阈值
+            cwnd = 1;
+            dupACKcount = 0; // 重新计数
+            N = min(cwnd, recv_window);
+            RenoState = 0; // 慢启动阶段
+            cout << "*** 进入慢启动阶段 窗口大小重设为" << N << " ***" << endl;
+            start = clock();
+
+            // 依旧是超时重传，全部重发 !!
+            for (int i = 0; i < message_queue.size(); i++) {
+                send_packet_GBN(message_queue.front(), SendSocket, RecvAddr);
+                print_Send_information(message_queue.front(), "ReSend");
+                message_queue.push(message_queue.front());
+                message_queue.pop();
+                // Sleep(10);
+            }
+        }
+        slock.unlock();
+    }
+    return 0;
+}
+
+// 修改框架改为多线程模式
+void multithread_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
+    // 每次文件发送预先初始化
+    Reno_init();
+
+    // 提前预备packet_num
+    ifstream fin(filename.c_str(), ifstream::binary);
+    fin.seekg(0, std::ifstream::end);
+    long size = fin.tellg();
+    file_size = size;
+    fin.seekg(0);
+    packet_num = size / DEFAULT_BUFLEN + 1;
+
+    // 创建参数结构体
+    Send_params temp_send(filename, SendSocket, RecvAddr);
+    Recv_params temp_recv(SendSocket, RecvAddr);
+
+    //----------------------
+    // 创建三个线程，一个接受线程，一个发送线程
+    HANDLE hThread[2];
+    hThread[0] = CreateThread(NULL, 0, Send, (LPVOID)&temp_send, 0, NULL);
+    hThread[1] = CreateThread(NULL, 0, Recv, (LPVOID)&temp_recv, 0, NULL);
+    // hThread[2] = CreateThread(NULL, 0, Timer, (LPVOID)&temp_recv, 0, NULL);
+
+    WaitForMultipleObjects(2, hThread, TRUE, INFINITE);
+    CloseHandle(hThread[0]);
+    CloseHandle(hThread[1]);
+    // CloseHandle(hThread[2]);
 }
 
 // 拥塞控制的Reno发送文件函数
@@ -274,7 +701,7 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
     // 处理SEQ回环，mod运算，商和余数
     // uint16_t quotient = 0;
     uint16_t remainder = 0;
-    int RTT_ACK = 0; 
+    int RTT_ACK = 0;
     while (ACK_index < packet_num) {
         if (next_seqnum < base + N && next_seqnum <= packet_num) {
             // quotient = next_seqnum / DEFAULT_SEQNUM;
@@ -333,7 +760,7 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
             // 没有校验和的错误
             if (Recv_udp.udp_header.Flag == ACK && checksum((uint16_t*)&Recv_udp, UDP_LEN) == 0) {
                 switch (RenoState) {
-                // 慢启动
+                    // 慢启动
                 case 0:
                     cout << "***** 慢启动阶段 *****" << endl;
                     cout << "Send Window Size: " << N << endl;
@@ -383,14 +810,14 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                         // 快速恢复阶段
                         ssthresh = cwnd / 2;
                         cwnd = ssthresh + 3;
-                        RenoState = 2; 
+                        RenoState = 2;
                         recover = message_queue.back().udp_header.SEQ;
                         dupACKcount = 0;
                         N = min(cwnd, recv_window); // 需要更新发送窗口大小
                     }
                     break;
-                
-                // 拥塞避免阶段
+
+                    // 拥塞避免阶段
                 case 1:
                     cout << "***** 拥塞避免阶段 *****" << endl;
                     cout << "Send Window Size: " << N << endl;
@@ -446,9 +873,9 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                         N = min(cwnd, recv_window); // 需要更新发送窗口大小
                     }
                     break;
-                
-                // 快速恢复阶段
-                case 2: 
+
+                    // 快速恢复阶段
+                case 2:
                     cout << "***** 快速恢复阶段 *****" << endl;
                     cout << "Send Window Size: " << N << endl;
                     cout << "base: " << base << endl;
@@ -513,7 +940,7 @@ void send_file_Reno(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) 
                             // Sleep(10);
                         }
                     }
-                    break; 
+                    break;
 
                 default:
                     cout << "Error RenoState!!!" << endl;
@@ -556,7 +983,7 @@ void send_file_GBN(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     cout << " ** 文件名校验和：" << check << endl;
     cout << " ** 发送数据包的数量：" << packet_num << endl;
     cout << " ** Windows窗口大小：" << N << endl;
-    
+
     // 正常发送第一个文件名数据包
     send_packet(udp_packets, SendSocket, RecvAddr);
 
@@ -662,7 +1089,7 @@ void send_file(string filename, SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     // 第一个数据包要发送文件名，并且先只标记START
     HEADER udp_header(filename.length(), 0, START, stream_seq_order, seq_order);
     my_udp udp_packets(udp_header, filename.c_str());
-    
+
     // 测试校验和 sizeof(HEADER): 8  sizeof(my_udp): 4104 = 4096 + 8
     uint16_t check = checksum((uint16_t*)&udp_packets, UDP_LEN); // 计算校验和
     udp_packets.udp_header.cksum = check;
@@ -756,11 +1183,11 @@ bool Connect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
     memcpy(&first_connect, connect_buffer, UDP_LEN);
     // 保存SYN_ACK的SEQ信息，完成k+1的验证
     uint16_t Recv_connect_Seq = 0x0;
-    if (first_connect.udp_header.Flag == SYN_ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF){
+    if (first_connect.udp_header.Flag == SYN_ACK && checksum((uint16_t*)&first_connect, UDP_LEN) == 0 && first_connect.udp_header.SEQ == 0xFFFF) {
         Recv_connect_Seq = 0xFFFF; // first_connect.udp_header.SEQ
         cout << "-----*** 完成第二次握手 ***-----" << endl;
     }
-    else{
+    else {
         cout << "-----*** 第二次握手Error，请重启Sender ***-----:(" << endl;
         return 0;
     }
@@ -803,7 +1230,7 @@ bool disConnect(SOCKET& SendSocket, sockaddr_in& RecvAddr) {
         return 0;
     }
 
-    clock_t start = clock(); 
+    clock_t start = clock();
     u_long mode = 1;
     ioctlsocket(SendSocket, FIONBIO, &mode); // 设置成阻塞模式等待ACK响应
 
@@ -943,14 +1370,15 @@ int main()
         }
         else {
             clock_t start = clock();
-            send_file_Reno(command, SendSocket, RecvAddr);
+            // send_file_Reno(command, SendSocket, RecvAddr);
+            multithread_Reno(command, SendSocket, RecvAddr);
             clock_t end = clock();
             cout << "**传输文件时间为：" << (end - start) / CLOCKS_PER_SEC << "s" << endl;
             cout << "**吞吐率为:" << ((float)file_size) / ((end - start) / CLOCKS_PER_SEC) << " bytes/s " << endl << endl;
             continue;
         }
     }
-    
+
     //---------------------------------------------
     // 四次挥手断连，FIN
     if (disConnect(SendSocket, RecvAddr)) {
